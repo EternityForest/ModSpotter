@@ -10,7 +10,7 @@ export interface HeatmapData {
 // Processing parameters
 const FFT1 = 256;
 const FFT1_OVERLAP = 8;
-const LOMB_RES = 512;
+const MAX_MODULATOR_HZ = 120;
 const MAX_AUDIO_LENGTH = 44100 * 240;
 
 /**
@@ -220,9 +220,12 @@ export async function processAudioToHeatmap(
       binFFT.dispose();
     }
 
-    const outputLength = Math.min(LOMB_RES, Math.floor(paddedLength / 2) + 1);
+    // Dynamically calculate output length based on max modulator frequency (120Hz)
+    const nyquistLimit = Math.floor(paddedLength / 2) + 1;
+    const maxFreqLimit = Math.floor((MAX_MODULATOR_HZ * paddedLength) / binSampleRate) + 1;
+    const outputLength = Math.min(nyquistLimit, maxFreqLimit);
 
-    // Take only first LOMB_RES frequencies
+    // Take frequencies up to MAX_MODULATOR_HZ (120Hz)
     const resultData: number[][] = [];
     for (let bin = 0; bin < numBins; bin++) {
       resultData.push(allBinFFTs[bin].slice(0, outputLength));
