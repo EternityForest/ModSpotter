@@ -1,52 +1,10 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
-// Guard against double-registration (HMR)
-if (!customElements.get('audio-uploader')) {
-  @customElement('audio-uploader')
-  export class AudioUploader extends LitElement {
+@customElement('audio-uploader')
+export class AudioUploader extends LitElement {
   static override styles = css`
-    :host {
-      display: block;
-    }
-
-    .upload-area {
-      border: 2px dashed #ccc;
-      border-radius: 8px;
-      padding: 1.5rem;
-      text-align: center;
-      cursor: pointer;
-      transition: border-color 0.2s, background 0.2s;
-    }
-
-    .upload-area:hover {
-      border-color: #666;
-      background: #f0f0f0;
-    }
-
-    .upload-area.dragover {
-      border-color: #2196f3;
-      background: #e3f2fd;
-    }
-
-    .upload-area.disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    input[type="file"] {
-      display: none;
-    }
-
-    .icon {
-      font-size: 2rem;
-      margin-bottom: 0.5rem;
-    }
-
-    .hint {
-      color: #666;
-      font-size: 0.875rem;
-    }
+    :host { display: block; }
   `;
 
   @property({ type: Boolean }) disabled = false;
@@ -128,11 +86,8 @@ if (!customElements.get('audio-uploader')) {
         try {
           const arrayBuffer = reader.result as ArrayBuffer;
           const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-          // Get first channel only
           const channelData = audioBuffer.getChannelData(0);
           const audioData = Float32Array.from(channelData);
-
           resolve({
             audioData,
             sampleRate: audioBuffer.sampleRate
@@ -149,7 +104,7 @@ if (!customElements.get('audio-uploader')) {
 
   private triggerFileInput() {
     if (!this.disabled) {
-      this.shadowRoot?.querySelector<HTMLInputElement>('input')?.click();
+      this.querySelector<HTMLInputElement>('input')?.click();
     }
   }
 
@@ -157,17 +112,19 @@ if (!customElements.get('audio-uploader')) {
     return html`
       <div
         class="upload-area ${this.disabled ? 'disabled' : ''}"
+        style="border: 2px dashed #ccc; border-radius: 8px; padding: 1.5rem; text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s;"
         @click="${this.triggerFileInput}"
         @dragover="${this.handleDragOver}"
         @dragleave="${this.handleDragLeave}"
         @drop="${this.handleDrop}"
       >
-        <div class="icon">📁</div>
+        <div style="font-size: 2rem; margin-bottom: 0.5rem;">📁</div>
         <div>Click to upload or drag and drop</div>
-        <div class="hint">WAV, MP3, OGG, FLAC</div>
+        <div style="color: #666; font-size: 0.875rem;">WAV, MP3, OGG, FLAC</div>
         <input
           type="file"
           accept="audio/*"
+          style="display: none;"
           @change="${this.handleFileSelect}"
           ?disabled="${this.disabled}"
         />

@@ -1,12 +1,12 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { AudioUploader } from './components/audio-uploader.js';
-import { AudioRecorder } from './components/audio-recorder.js';
-import { HeatmapChart } from './components/heatmap-chart.js';
+import './components/audio-uploader.js';
+import './components/audio-recorder.js';
+import './components/heatmap-chart.js';
 import { processAudioToHeatmap, HeatmapData } from './lib/fft-processor.js';
 
 @customElement('modspotter-app')
-export class ModspotterApp extends LitElement {
+class ModspotterApp extends LitElement {
   static override styles = css`
     :host {
       display: block;
@@ -78,15 +78,17 @@ export class ModspotterApp extends LitElement {
   }
 
   @state() private heatmapData: HeatmapData | null = null;
-  @state() private status: string = '';
+  @state() private status = '';
   @state() private statusType: 'processing' | 'error' | 'success' | '' = '';
-  @state() private isProcessing: boolean = false;
+  @state() private isProcessing = false;
 
-  private handleAudioLoaded = async (audioData: Float32Array, sampleRate: number) => {
+  private handleAudioLoaded = async (e: CustomEvent) => {
+    const { audioData, sampleRate } = e.detail;
     this.status = 'Processing audio with TensorFlow.js...';
     this.statusType = 'processing';
     this.isProcessing = true;
     this.heatmapData = null;
+    this.requestUpdate();
 
     try {
       const result = await processAudioToHeatmap(audioData, sampleRate);
@@ -101,11 +103,14 @@ export class ModspotterApp extends LitElement {
     } finally {
       this.isProcessing = false;
     }
+    this.requestUpdate();
   };
 
-  private handleError = (err: string) => {
+  private handleError = (e: CustomEvent) => {
+    const err = e.detail;
     this.status = err;
     this.statusType = 'error';
+    this.requestUpdate();
   };
 
   override render() {
@@ -144,6 +149,8 @@ export class ModspotterApp extends LitElement {
     `;
   }
 }
+
+export { ModspotterApp };
 
 declare global {
   interface HTMLElementTagNameMap {

@@ -1,59 +1,10 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-// Guard against double-registration (HMR)
-if (!customElements.get('audio-recorder')) {
-  @customElement('audio-recorder')
-  export class AudioRecorder extends LitElement {
+@customElement('audio-recorder')
+export class AudioRecorder extends LitElement {
   static override styles = css`
-    :host {
-      display: block;
-    }
-
-    .record-btn {
-      width: 100%;
-      padding: 1rem;
-      font-size: 1rem;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: background 0.2s;
-      background: #f44336;
-      color: white;
-    }
-
-    .record-btn:hover:not(:disabled) {
-      background: #d32f2f;
-    }
-
-    .record-btn:disabled {
-      background: #ccc;
-      cursor: not-allowed;
-    }
-
-    .record-btn.recording {
-      background: #ff1744;
-      animation: pulse 1s infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.7; }
-    }
-
-    .duration {
-      margin-top: 0.5rem;
-      text-align: center;
-      color: #666;
-      font-size: 0.875rem;
-    }
-
-    .hint {
-      margin-top: 0.75rem;
-      color: #666;
-      font-size: 0.75rem;
-      text-align: center;
-    }
+    :host { display: block; }
   `;
 
   @property({ type: Boolean }) disabled = false;
@@ -86,9 +37,7 @@ if (!customElements.get('audio-recorder')) {
       this.mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
         const audioData = await this.blobToAudio(audioBlob);
-
         stream.getTracks().forEach(track => track.stop());
-
         this.dispatchEvent(new CustomEvent('audio-loaded', {
           detail: audioData,
           bubbles: true,
@@ -118,12 +67,10 @@ if (!customElements.get('audio-recorder')) {
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       this.mediaRecorder.stop();
     }
-
     if (this.durationInterval) {
       clearInterval(this.durationInterval);
       this.durationInterval = null;
     }
-
     this.isRecording = false;
     this.duration = 0;
   }
@@ -132,14 +79,9 @@ if (!customElements.get('audio-recorder')) {
     const arrayBuffer = await blob.arrayBuffer();
     const audioContext = new AudioContext();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
     const channelData = audioBuffer.getChannelData(0);
     const audioData = Float32Array.from(channelData);
-
-    return {
-      audioData,
-      sampleRate: audioBuffer.sampleRate
-    };
+    return { audioData, sampleRate: audioBuffer.sampleRate };
   }
 
   private handleClick() {
@@ -151,18 +93,29 @@ if (!customElements.get('audio-recorder')) {
   }
 
   override render() {
+    const btnStyle = this.isRecording
+      ? 'background: #ff1744; animation: pulse 1s infinite;'
+      : 'background: #f44336;';
+    const disabledStyle = this.disabled ? 'background: #ccc; cursor: not-allowed;' : '';
+
     return html`
+      <style>
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.7; }
+        }
+      </style>
       <button
-        class="record-btn ${this.isRecording ? 'recording' : ''}"
+        style="width: 100%; padding: 1rem; font-size: 1rem; border: none; border-radius: 8px; cursor: pointer; color: white; ${btnStyle}${disabledStyle}"
         @click="${this.handleClick}"
         ?disabled="${this.disabled}"
       >
         ${this.isRecording ? '⏹ Stop Recording' : '🎤 Start Recording'}
       </button>
       ${this.isRecording ? html`
-        <div class="duration">Recording: ${this.duration}s</div>
+        <div style="margin-top: 0.5rem; text-align: center; color: #666; font-size: 0.875rem;">Recording: ${this.duration}s</div>
       ` : ''}
-      <div class="hint">Recording will be decoded as WebM/Opus</div>
+      <div style="margin-top: 0.75rem; color: #666; font-size: 0.75rem; text-align: center;">Recording will be decoded as WebM/Opus</div>
     `;
   }
 }

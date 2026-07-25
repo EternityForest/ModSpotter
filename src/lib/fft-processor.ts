@@ -7,18 +7,20 @@ export interface HeatmapData {
   sampleRate: number;
 }
 
-// Processing parameters (matching redbat.py)
+// Processing parameters
 const FFT1 = 256;
 const FFT1_OVERLAP = 8;
 const LOMB_RES = 512;
+const MAX_AUDIO_LENGTH = 44100 * 240;
 
 /**
- * Generate Hanning window tensor
+ * Generate Hanning window as plain array
  */
-function hanningWindow(size: number): tf.Tensor {
-  // Hanning window: 0.5 * (1 - cos(2*pi*n / (N-1)))
-  const n = tf.range(0, size, 1, 'float32');
-  const window = 0.5 * (1 - tf.cos(2 * Math.PI * n / (size - 1)));
+function hanningWindow(size: number): number[] {
+  const window: number[] = [];
+  for (let i = 0; i < size; i++) {
+    window.push(0.5 * (1 - Math.cos(2 * Math.PI * i / (size - 1))));
+  }
   return window;
 }
 
@@ -30,149 +32,264 @@ function nextPowerOf2(n: number): number {
 }
 
 /**
- * Perform batch 1D FFT using TF.js
- * For real input, uses rfft for efficiency
- */
-function batchRfft(tensor: tf.Tensor): tf.Tensor {
-  // tf.signal is not available in all TF.js versions, so we use math ops
-  // This is a simplified version - for production, consider tf.signal.rfft
-  return tf.spectral.rfft(tensor);
-}
-
-/**
- * Main processing pipeline - runs entirely in TF.js for GPU acceleration
+ * Main processing pipeline - process in batches to avoid GPU memory issues
  */
 export async function processAudioToHeatmap(
   audioData: Float32Array,
   sampleRate: number
 ): Promise<HeatmapData> {
-  return tf.tidy(() => {
-    // Convert input to tensor
-    const audio = tf.tensor1d(audioData, 'float32');
-    const audioLength = audioData.length;
+  // Limit audio length to avoid GPU memory issues
+  let audio = audioData;
+  if (audio.length > MAX_AUDIO_LENGTH) {
+    audio = audio.slice(0, MAX_AUDIO_LENGTH);
+  }
 
-    // Step 1: Create overlapping FFT segments
-    // Hanning window
-    const window = hanningWindow(FFT1);
+  const audioTensor = tf.tensor1d(audio, 'float32');
+  const audioLength = audio.length;
+  const hanningWin = hanningWindow(FFT1);
 
-    // Calculate number of complete windows
+  // Debug: check Hanning window
+  console.log('Hanning window:', hanningWin.slice(0, 10));
+
+  try {
+    // Step 1: Create overlapping FFT segments with Hanning window
     const numWindows = Math.floor(audioLength / FFT1);
 
-    // Create overlapping segments as a 2D tensor [segments, FFT1]
-    const segments: tf.Tensor[] = [];
+    // Process in batches to save GPU memory
+    const BATCH_SIZE = 64;
+    const allFFTs: number[][] = [];
 
-    for (let i = 0; i < numWindows; i++) {
-      for (let o = 0; o < FFT1_OVERLAP; o++) {
-        const offset = (o / FFT1_OVERLAP) * FFT1;
-        const start = Math.floor((i + offset) * FFT1);
-        const end = start + FFT1;
+    for (let batchStart = 0; batchStart < numWindows; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, numWindows);
+      const batchSegments: tf.Tensor[] = [];
 
-        if (end <= audioLength) {
-          const segment = audio.slice([start], [FFT1]);
-          // Apply Hanning window
-          const windowed = segment.mul(window);
-          segments.push(windowed);
+      for (let i = batchStart; i < batchEnd; i++) {
+        for (let o = 0; o < FFT1_OVERLAP; o++) {
+          const offset = (o / FFT1_OVERLAP) * FFT1;
+          const start = Math.floor((i + offset) * FFT1);
+          const end = start + FFT1;
+
+          if (end <= audioLength) {
+            const segment = audioTensor.slice([start], [FFT1]);
+            
+            // Apply Hanning window manually (element-wise multiply)
+            const windowed = segment.mul(tf.tensor1d(hanningWin, 'float32'));
+            
+            // Debug: check first segment
+            if (i === batchStart && o === 0) {
+              const segArray = segment.arraySync() as Float32Array;
+              const winArray = windowed.arraySync() as Float32Array;
+              console.log('First segment:', segArray.slice(0, 10));
+              console.log('First windowed:', winArray.slice(0, 10));
+            }
+            
+            batchSegments.push(windowed);
+          }
         }
+      }
+
+      if (batchSegments.length > 0) {
+        const segmentsTensor = tf.stack(batchSegments);
+        
+        // Debug: check stacked tensor
+        if (batchStart === 0) {
+          console.log('Stacked tensor shape:', segmentsTensor.shape);
+        }
+        
+        const fftResult = tf.abs(tf.spectral.rfft(segmentsTensor));
+
+        // Debug: check FFT output
+        const fftArray = fftResult.arraySync() as number[][];
+        if (batchStart === 0) {
+          console.log('First FFT batch:', fftArray[0]?.slice(0, 10));
+        }
+        
+        allFFTs.push(...fftArray);
+
+        // Explicit cleanup
+        segmentsTensor.dispose();
+        fftResult.dispose();
+        batchSegments.forEach(t => t.dispose());
       }
     }
 
-    // Stack all segments: [totalSegments, FFT1]
-    const segmentsTensor = tf.stack(segments);
+    if (allFFTs.length === 0) {
+      return createEmptyResult(sampleRate);
+    }
 
-    // Step 2: Compute FFT for each segment and take magnitude
-    // [totalSegments, FFT1/2+1]
-    const fftResult = tf.abs(tf.spectral.rfft(segmentsTensor));
-
-    // Step 3: Average overlapping FFTs to produce shorter list
-    // Group by FFT1_OVERLAP and average
-    const numAveraged = Math.floor(segments.length / FFT1_OVERLAP);
-    const averagedFFTs: tf.Tensor[] = [];
+    // Step 3: Average overlapping FFTs
+    const numAveraged = Math.floor(allFFTs.length / FFT1_OVERLAP);
+    const averagedFFTs: number[][] = [];
 
     for (let i = 0; i < numAveraged; i++) {
-      const group = fftTensor.slice([i * FFT1_OVERLAP], [FFT1_OVERLAP]);
-      const avg = group.mean(0);
-      averagedFFTs.push(avg);
+      let sum: number[] = new Array(allFFTs[0].length).fill(0);
+      for (let o = 0; o < FFT1_OVERLAP; o++) {
+        const idx = i * FFT1_OVERLAP + o;
+        if (idx < allFFTs.length) {
+          for (let j = 0; j < sum.length; j++) {
+            sum[j] += allFFTs[idx][j];
+          }
+        }
+      }
+      averagedFFTs.push(sum.map(v => v / FFT1_OVERLAP));
     }
 
-    const averagedTensor = tf.stack(averagedFFTs); // [numAveraged, FFT1/2+1]
     const numTimeSteps = numAveraged;
-    const numBins = Math.floor(FFT1 / 2) + 1;
+    const numBins = averagedFFTs[0].length;
 
-    // Step 4: For each frequency bin, subtract the average of that bin across time
-    // This removes the carrier wave, leaving only modulation
-    const binAverages = averagedTensor.mean(0); // [numBins]
-    const binAveragesExpanded = binAverages.reshape([1, numBins]);
-    const normalizedTensor = averagedTensor.sub(binAveragesExpanded); // [numTimeSteps, numBins]
+    // Step 4: For each frequency bin, subtract the average (CPU)
+    const binAverages = new Array(numBins).fill(0);
+    for (let i = 0; i < numTimeSteps; i++) {
+      for (let j = 0; j < numBins; j++) {
+        binAverages[j] += averagedFFTs[i][j];
+      }
+    }
+    binAverages.forEach((v, j) => binAverages[j] = v / numTimeSteps);
 
-    // Transpose to get [numBins, numTimeSteps] - each row is one bin's time series
-    const binsTensor = normalizedTensor.transpose();
+    // Debug: check averagedFFTs and binAverages
+    console.log('Averaged FFTs[0]:', averagedFFTs[0]?.slice(0, 10));
+    console.log('Bin averages:', binAverages.slice(0, 10));
 
-    // Step 5: For each bin, do FFT across time (with padding to power of 2)
+    const normalizedFFTs: number[][] = [];
+    for (let i = 0; i < numTimeSteps; i++) {
+      const normalized: number[] = [];
+      for (let j = 0; j < numBins; j++) {
+        normalized.push(averagedFFTs[i][j] - binAverages[j]);
+      }
+      normalizedFFTs.push(normalized);
+    }
+
+    console.log('Normalized FFTs[0]:', normalizedFFTs[0]?.slice(0, 10));
+
+    // Step 5: For each bin, do FFT across time (with padding)
     const paddedLength = nextPowerOf2(numTimeSteps);
     const binSampleRate = sampleRate / FFT1;
+    const allBinFFTs: number[][] = [];
 
-    // Process bins in batches for memory efficiency
-    const numFreqBins = Math.floor(FFT1 / 2) + 1;
-    const allBinFFTs: tf.Tensor[] = [];
+    for (let bin = 0; bin < numBins; bin++) {
+      // Extract this bin's time series (CPU)
+      const binSeries = normalizedFFTs.map(row => row[bin]);
 
-    for (let bin = 0; bin < numFreqBins; bin++) {
-      // Extract this bin's time series
-      const binSeries = binsTensor.slice([bin, 0], [1, numTimeSteps]).reshape([numTimeSteps]);
+      // Debug: check bin series
+      if (bin === 0) {
+        console.log('Bin series:', binSeries.slice(0, 10), 'length:', binSeries.length);
+      }
 
       // Pad to next power of 2
-      const paddedSeries = tf.concat([
-        binSeries,
-        tf.zeros([paddedLength - numTimeSteps], 'float32')
-      ]);
+      const paddedSeries = [...binSeries];
+      while (paddedSeries.length < paddedLength) {
+        paddedSeries.push(0);
+      }
 
-      // Apply Hanning window to the padded series
-      const paddedWindow = hanningWindow(paddedLength);
-      const windowedSeries = paddedSeries.mul(paddedWindow);
+      // Debug: check padded series
+      if (bin === 0) {
+        console.log('Padded series:', paddedSeries.slice(0, 10), 'length:', paddedSeries.length);
+      }
 
-      // Compute FFT (magnitude)
-      const binFFT = tf.abs(tf.spectral.rfft(windowedSeries.reshape([1, paddedLength])));
-      const binFFT1D = binFFT.reshape([Math.floor(paddedLength / 2) + 1]);
+      // Apply Hanning window
+      const windowedSeries = paddedSeries.map((v, i) =>
+        v * (0.5 * (1 - Math.cos(2 * Math.PI * i / (paddedLength - 1))))
+      );
 
-      allBinFFTs.push(binFFT1D);
+      // Compute FFT using TF.js
+      const seriesTensor = tf.tensor1d(windowedSeries, 'float32');
+      const fftComplex = tf.spectral.rfft(seriesTensor);
+      const binFFT = tf.abs(fftComplex);
+      const binFFTArray = binFFT.arraySync() as number[];
+
+      // Debug: check first bin FFT
+      if (bin === 0) {
+        console.log('First bin FFT:', binFFTArray.slice(0, 10), 'length:', binFFTArray.length);
+      }
+
+      allBinFFTs.push(binFFTArray);
+
+      seriesTensor.dispose();
+      fftComplex.dispose();
+      binFFT.dispose();
     }
 
-    // Stack all bin FFTs: [numFreqBins, FFT_OUTPUT]
-    const allBinsStacked = tf.stack(allBinFFTs);
-
-    // Take only first LOMB_RES frequencies for each bin
     const outputLength = Math.min(LOMB_RES, Math.floor(paddedLength / 2) + 1);
-    const resultTensor = allBinsStacked.slice([0, 0], [numFreqBins, outputLength]);
 
-    // Step 6: Clip to percentile range (20th to 99.995th)
-    // Use topK for percentile computation (more compatible with TF.js)
-    const flatResult = resultTensor.reshape([-1]);
-    const n = numFreqBins * outputLength;
+    // Take only first LOMB_RES frequencies
+    const resultData: number[][] = [];
+    for (let bin = 0; bin < numBins; bin++) {
+      resultData.push(allBinFFTs[bin].slice(0, outputLength));
+    }
 
-    // Get indices for 20th and 99.995th percentiles
-    const p20Idx = Math.floor(n * 0.2);
-    const p99995Idx = Math.floor(n * 0.99995);
+    // Debug: check raw FFT values
+    let rawSum = 0;
+    let rawCount = 0;
+    let rawMin = Infinity;
+    let rawMax = -Infinity;
+    for (const row of resultData) {
+      for (const v of row) {
+        if (isFinite(v)) {
+          rawSum += v;
+          rawCount++;
+          rawMin = Math.min(rawMin, v);
+          rawMax = Math.max(rawMax, v);
+        }
+      }
+    }
+    console.log('Raw FFT:', { rawMin, rawMax, rawAvg: rawCount > 0 ? rawSum / rawCount : 0, rawCount });
 
-    // Use topK to find percentile values
-    const { values: sortedVals } = tf.topk(flatResult, n, true);
-    const minVal = sortedVals.slice([p20Idx], [1]).reshape([]) as tf.Scalar;
-    const maxVal = sortedVals.slice([p99995Idx], [1]).reshape([]) as tf.Scalar;
+    // Step 6: Normalize - skip percentile clipping for now
+    // Filter out NaN/Inf values first
+    const validResults = resultData.map(row => row.map(v => isNaN(v) || !isFinite(v) ? 0 : Math.abs(v)));
 
-    const clipped = tf.maximum(resultTensor, minVal);
-    const clipped2 = tf.minimum(clipped, maxVal);
+    // Find min/max for normalization
+    let dataMin = Infinity;
+    let dataMax = -Infinity;
+    for (const row of validResults) {
+      for (const v of row) {
+        dataMin = Math.min(dataMin, v);
+        dataMax = Math.max(dataMax, v);
+      }
+    }
+    
+    console.log('Data range:', { dataMin, dataMax, range: dataMax - dataMin });
 
-    // Normalize to [0, 1] with log scale
-    const logResult = tf.log(clipped2.add(1e-10));
-    const logMin = tf.min(logResult);
-    const logMax = tf.max(logResult);
-    const normalized = logResult.sub(logMin).div(logMax.sub(logMin).add(1e-10));
+    // Apply log and normalize
+    let logMin = Infinity;
+    let logMax = -Infinity;
+    const logData: number[][] = [];
 
-    // Convert to JavaScript arrays
-    const zValues: number[][] = normalized.arraySync() as number[][];
+    for (let i = 0; i < validResults.length; i++) {
+      const logRow: number[] = [];
+      for (let j = 0; j < validResults[i].length; j++) {
+        const val = validResults[i][j];
+        const logVal = Math.log(val + 1e-10);
+        logRow.push(logVal);
+        logMin = Math.min(logMin, logVal);
+        logMax = Math.max(logMax, logVal);
+      }
+      logData.push(logRow);
+    }
+
+    console.log('Log range:', { logMin, logMax, logRange: logMax - logMin });
+
+    // Handle edge case where logMin == logMax
+    if (!isFinite(logMin) || !isFinite(logMax) || logMax === logMin) {
+      logMin = 0;
+      logMax = 1;
+    }
+
+    // Normalize to [0, 1]
+    const normalized: number[][] = [];
+    for (let i = 0; i < logData.length; i++) {
+      const row: number[] = [];
+      for (let j = 0; j < logData[i].length; j++) {
+        const norm = (logData[i][j] - logMin) / (logMax - logMin);
+        row.push(isNaN(norm) ? 0 : norm);
+      }
+      normalized.push(row);
+    }
 
     // Generate frequency arrays
     const carrierFreqs: number[] = [];
-    for (let i = 0; i < numFreqBins; i++) {
-      carrierFreqs.push((i / numFreqBins) * (sampleRate / 2));
+    for (let i = 0; i < numBins; i++) {
+      carrierFreqs.push((i / numBins) * (sampleRate / 2));
     }
 
     const modulatorFreqs: number[] = [];
@@ -188,10 +305,22 @@ export async function processAudioToHeatmap(
     }
 
     return {
-      zValues: zValues.reverse(), // Reverse so carrier freq goes from low to high
+      zValues: normalized.reverse(),
       carrierFreqs: carrierFreqs.reverse(),
       modulatorFreqs,
       sampleRate
     };
-  });
+  } finally {
+    // Cleanup
+    audioTensor.dispose();
+  }
+}
+
+function createEmptyResult(sampleRate: number): HeatmapData {
+  return {
+    zValues: [[0]],
+    carrierFreqs: [0],
+    modulatorFreqs: [0],
+    sampleRate
+  };
 }
