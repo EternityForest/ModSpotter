@@ -164,7 +164,18 @@ export async function processAudioToHeatmap(
     // Step 5: For each bin, do FFT across time (with padding)
     const paddedLength = nextPowerOf2(numTimeSteps);
     const binSampleRate = sampleRate / FFT1;
+    
+    console.log('Bin sample rate:', binSampleRate, 'paddedLength:', paddedLength, 'numTimeSteps:', numTimeSteps);
+
     const allBinFFTs: number[][] = [];
+
+    const modulatorFreqs: number[] = [];
+    for (let i = 0; i < paddedLength; i++) {
+      // FFT frequency bins: k * sampleRate / N
+      modulatorFreqs.push((i * binSampleRate) / paddedLength);
+    }
+    
+    console.log('Modulator freq range:', modulatorFreqs[1], modulatorFreqs[paddedLength-1]);
 
     for (let bin = 0; bin < numBins; bin++) {
       // Extract this bin's time series (CPU)
@@ -290,18 +301,6 @@ export async function processAudioToHeatmap(
     const carrierFreqs: number[] = [];
     for (let i = 0; i < numBins; i++) {
       carrierFreqs.push((i / numBins) * (sampleRate / 2));
-    }
-
-    const modulatorFreqs: number[] = [];
-    const radShzConv = 0.1591549;
-    for (let i = 0; i < outputLength; i++) {
-      if (i === 0) {
-        modulatorFreqs.push(0);
-      } else {
-        modulatorFreqs.push(
-          ((i / (outputLength - 1)) * (binSampleRate / 2)) / radShzConv
-        );
-      }
     }
 
     return {
