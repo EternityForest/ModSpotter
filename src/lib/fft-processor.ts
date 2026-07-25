@@ -53,30 +53,29 @@ export async function processAudioToHeatmap(
 
   try {
     // Step 1: Create overlapping FFT segments with Hanning window
-    const numWindows = Math.floor(audioLength / FFT1);
+    const hopSize = FFT1 / FFT1_OVERLAP; // 32 samples for 8x overlap
+    const numSegments = Math.floor((audioLength - FFT1) / hopSize) + 1;
 
     // Process in batches to save GPU memory
     const BATCH_SIZE = 64;
     const allFFTs: number[][] = [];
 
-    for (let batchStart = 0; batchStart < numWindows; batchStart += BATCH_SIZE) {
-      const batchEnd = Math.min(batchStart + BATCH_SIZE, numWindows);
+    for (let batchStart = 0; batchStart < numSegments; batchStart += BATCH_SIZE) {
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, numSegments);
       const batchSegments: tf.Tensor[] = [];
 
-      for (let i = batchStart; i < batchEnd; i++) {
-        for (let o = 0; o < FFT1_OVERLAP; o++) {
-          const offset = (o / FFT1_OVERLAP) * FFT1;
-          const start = Math.floor((i + offset) * FFT1);
-          const end = start + FFT1;
+      for (let segIdx = batchStart; segIdx < batchEnd; segIdx++) {
+        const start = Math.floor(segIdx * hopSize);
+        const end = start + FFT1;
 
-          if (end <= audioLength) {
+        if (end <= audioLength) {
             const segment = audioTensor.slice([start], [FFT1]);
             
             // Apply Hanning window manually (element-wise multiply)
             const windowed = segment.mul(tf.tensor1d(hanningWin, 'float32'));
             
             // Debug: check first segment
-            if (i === batchStart && o === 0) {
+            if (segIdx === 0) {
               const segArray = segment.arraySync() as Float32Array;
               const winArray = windowed.arraySync() as Float32Array;
               console.log('First segment:', segArray.slice(0, 10));
@@ -84,8 +83,8 @@ export async function processAudioToHeatmap(
             }
             
             batchSegments.push(windowed);
-          }
         }
+
       }
 
       if (batchSegments.length > 0) {
