@@ -12,6 +12,8 @@ export default defineConfig({
       }
     }
   },
+  
+  base: './',
   optimizeDeps: {
     include: ['@tensorflow/tfjs', 'plotly.js-dist-min']
   }
